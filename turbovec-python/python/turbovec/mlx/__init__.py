@@ -111,6 +111,51 @@ class TurboQuantIndex:
             self._norms = mx.concatenate([self._norms, norms], axis=0)
         self._n += n
 
+    def swap_remove(self, idx: int) -> int:
+        """Remove the vector at ``idx`` by swapping with the last vector.
+
+        Returns the previous index of the moved vector (``len(self) - 1``
+        before the call, or ``idx`` itself if ``idx`` was already last).
+
+        Unlike the Rust path (which is O(1)), this is **O(n)** on MLX:
+        ``mx.array`` is immutable, so each call rebuilds the codes and
+        norms arrays via ``mx.concatenate``. Fine for occasional doc
+        deletions; expensive for mass churn — accumulate into a batch
+        and consider rebuilding the index instead.
+        """
+        if self._n == 0:
+            raise IndexError("index is empty")
+        if idx < 0 or idx >= self._n:
+            raise IndexError(
+                f"index {idx} out of range for len {self._n}"
+            )
+        last = self._n - 1
+        if last == 0:
+            self._packed_codes = None
+            self._norms = None
+        elif idx == last:
+            self._packed_codes = self._packed_codes[:last]
+            self._norms = self._norms[:last]
+        else:
+            self._packed_codes = mx.concatenate(
+                [
+                    self._packed_codes[:idx],
+                    self._packed_codes[last : last + 1],
+                    self._packed_codes[idx + 1 : last],
+                ],
+                axis=0,
+            )
+            self._norms = mx.concatenate(
+                [
+                    self._norms[:idx],
+                    self._norms[last : last + 1],
+                    self._norms[idx + 1 : last],
+                ],
+                axis=0,
+            )
+        self._n -= 1
+        return last
+
     def write(self, path: str) -> None:
         """Write the index to a ``.tv`` file.
 
@@ -233,6 +278,28 @@ class IdMapIndex:
             slot = base + i
             self._slot_to_id.append(id_int)
             self._id_to_slot[id_int] = slot
+
+    def remove(self, id_: int) -> bool:
+        """Remove the vector with external id ``id_``.
+
+        Returns ``True`` if the id was present and removed, ``False``
+        otherwise. Inherits the O(n) cost of the inner
+        :meth:`TurboQuantIndex.swap_remove` — see its docstring.
+        """
+        id_int = int(id_)
+        slot = self._id_to_slot.get(id_int)
+        if slot is None:
+            return False
+        last = len(self._inner) - 1
+        moved_from = self._inner.swap_remove(slot)
+        assert moved_from == last
+        del self._id_to_slot[id_int]
+        if slot != last:
+            moved_id = self._slot_to_id[last]
+            self._slot_to_id[slot] = moved_id
+            self._id_to_slot[moved_id] = slot
+        self._slot_to_id.pop()
+        return True
 
     def search(self, queries, k: int):
         """Return top-``k`` ``(scores, ids)`` for each query.

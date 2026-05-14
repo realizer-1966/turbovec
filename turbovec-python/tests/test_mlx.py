@@ -383,3 +383,155 @@ def test_id_map_rejects_duplicate_ids():
         MlxIdMap(dim=dim, bit_width=4).add_with_ids(
             vectors, np.array([5, 6, 5, 7], dtype=np.uint64)
         )
+
+
+# --- swap_remove / remove ---
+
+
+def test_swap_remove_middle_shifts_last_into_slot():
+    dim = 64
+    vectors = _random_unit_vectors(5, dim, seed=70)
+    index = TurboQuantIndex(dim=dim, bit_width=4)
+    index.add(vectors)
+    before_codes = np.asarray(index._packed_codes).copy()
+    before_norms = np.asarray(index._norms).copy()
+
+    moved_from = index.swap_remove(1)
+    assert moved_from == 4
+    assert len(index) == 4
+
+    after_codes = np.asarray(index._packed_codes)
+    after_norms = np.asarray(index._norms)
+
+    # Slot 0 unchanged, slot 1 = original slot 4, slots 2 and 3 unchanged.
+    assert np.array_equal(after_codes[0], before_codes[0])
+    assert np.array_equal(after_codes[1], before_codes[4])
+    assert np.array_equal(after_codes[2], before_codes[2])
+    assert np.array_equal(after_codes[3], before_codes[3])
+    np.testing.assert_array_equal(after_norms[0], before_norms[0])
+    np.testing.assert_array_equal(after_norms[1], before_norms[4])
+    np.testing.assert_array_equal(after_norms[2], before_norms[2])
+    np.testing.assert_array_equal(after_norms[3], before_norms[3])
+
+
+def test_swap_remove_last_truncates_only():
+    dim = 64
+    vectors = _random_unit_vectors(3, dim, seed=71)
+    index = TurboQuantIndex(dim=dim, bit_width=4)
+    index.add(vectors)
+    before_codes = np.asarray(index._packed_codes).copy()
+
+    moved_from = index.swap_remove(2)
+    assert moved_from == 2
+    assert len(index) == 2
+
+    after_codes = np.asarray(index._packed_codes)
+    assert np.array_equal(after_codes, before_codes[:2])
+
+
+def test_swap_remove_down_to_empty():
+    dim = 64
+    vectors = _random_unit_vectors(2, dim, seed=72)
+    index = TurboQuantIndex(dim=dim, bit_width=4)
+    index.add(vectors)
+    index.swap_remove(0)
+    index.swap_remove(0)
+    assert len(index) == 0
+    assert index._packed_codes is None
+    assert index._norms is None
+
+
+def test_swap_remove_raises_on_invalid_index():
+    index = TurboQuantIndex(dim=64, bit_width=4)
+    with pytest.raises(IndexError):
+        index.swap_remove(0)  # empty
+
+    index.add(_random_unit_vectors(2, 64, seed=73))
+    with pytest.raises(IndexError):
+        index.swap_remove(5)
+    with pytest.raises(IndexError):
+        index.swap_remove(-1)
+
+
+def test_id_map_remove_returns_false_for_missing():
+    from turbovec.mlx import IdMapIndex as MlxIdMap
+
+    dim = 64
+    index = MlxIdMap(dim=dim, bit_width=4)
+    index.add_with_ids(
+        _random_unit_vectors(3, dim, seed=74),
+        np.array([10, 20, 30], dtype=np.uint64),
+    )
+    assert index.remove(99) is False
+    assert len(index) == 3
+
+
+def test_id_map_remove_updates_mappings_and_search():
+    from turbovec.mlx import IdMapIndex as MlxIdMap
+
+    dim = 64
+    vectors = _random_unit_vectors(5, dim, seed=75)
+    ids = np.array([100, 200, 300, 400, 500], dtype=np.uint64)
+    index = MlxIdMap(dim=dim, bit_width=4)
+    index.add_with_ids(vectors, ids)
+
+    assert index.remove(300) is True
+    assert len(index) == 4
+    assert 300 not in index
+    assert 100 in index and 200 in index and 400 in index and 500 in index
+
+    # Search must not return the removed id, even when the query is the
+    # removed vector itself.
+    scores, returned_ids = index.search(vectors[2:3], k=4)
+    assert 300 not in set(int(x) for x in returned_ids.flatten())
+    # All returned ids are still in the index.
+    for id_ in returned_ids.flatten():
+        assert int(id_) in index
+
+
+def test_id_map_remove_round_trips_through_file(tmp_path):
+    from turbovec.mlx import IdMapIndex as MlxIdMap
+
+    dim = 64
+    vectors = _random_unit_vectors(5, dim, seed=76)
+    ids = np.array([7, 11, 13, 17, 19], dtype=np.uint64)
+    index = MlxIdMap(dim=dim, bit_width=4)
+    index.add_with_ids(vectors, ids)
+    index.remove(13)
+
+    path = tmp_path / "after_remove.tvim"
+    index.write(str(path))
+    loaded = MlxIdMap.load(str(path))
+    assert len(loaded) == 4
+    assert 13 not in loaded
+    for id_ in (7, 11, 17, 19):
+        assert id_ in loaded
+
+
+def test_id_map_remove_matches_rust_post_search_set():
+    """After the same removal sequence on both backends, the surviving
+    id sets agree."""
+    from turbovec import IdMapIndex as RustIdMap
+    from turbovec.mlx import IdMapIndex as MlxIdMap
+
+    dim = 64
+    vectors = _random_unit_vectors(8, dim, seed=77)
+    ids = np.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=np.uint64)
+
+    rust = RustIdMap(dim=dim, bit_width=4)
+    rust.add_with_ids(vectors, ids)
+    mlx_idx = MlxIdMap(dim=dim, bit_width=4)
+    mlx_idx.add_with_ids(vectors, ids)
+
+    for rm in (3, 7, 1):
+        assert rust.remove(rm)
+        assert mlx_idx.remove(rm)
+
+    assert len(rust) == len(mlx_idx) == 5
+    surviving = {2, 4, 5, 6, 8}
+    for id_ in surviving:
+        assert id_ in rust
+        assert id_ in mlx_idx
+    for removed in (1, 3, 7):
+        assert removed not in rust
+        assert removed not in mlx_idx
