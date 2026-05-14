@@ -239,3 +239,147 @@ def test_search_returns_fewer_than_k_when_index_small():
     scores, idx = index.search(_random_unit_vectors(2, dim, seed=21), k=10)
     assert scores.shape == (2, 3)
     assert idx.shape == (2, 3)
+
+
+# --- .tv / .tvim round-trip ---
+
+@pytest.mark.parametrize("bit_width", [2, 4])
+@pytest.mark.parametrize("dim", [64, 128, 1536])
+def test_tv_round_trip_cpu_to_mlx(tmp_path, dim, bit_width):
+    """A `.tv` file written by the Rust CPU backend loads bit-exactly
+    into the MLX backend."""
+    from turbovec import TurboQuantIndex as RustIndex
+    from turbovec.mlx import TurboQuantIndex as MlxIndex
+
+    vectors = _random_unit_vectors(48, dim, seed=40)
+    rust = RustIndex(dim=dim, bit_width=bit_width)
+    rust.add(vectors)
+    path = tmp_path / "cpu.tv"
+    rust.write(str(path))
+
+    loaded = MlxIndex.load(str(path))
+    assert loaded.dim == dim
+    assert loaded.bit_width == bit_width
+    assert len(loaded) == 48
+    # Bit-exact vs the Rust encode oracle: writing and re-reading is a
+    # pure byte copy, so MLX-loaded values must equal Rust's originals
+    # bit-for-bit (not just close).
+    from turbovec._turbovec import encode as rust_encode
+
+    rust_packed, rust_norms = rust_encode(vectors, bit_width)
+    assert np.array_equal(np.asarray(loaded._packed_codes), rust_packed)
+    assert np.array_equal(np.asarray(loaded._norms), rust_norms)
+
+
+@pytest.mark.parametrize("bit_width", [2, 4])
+@pytest.mark.parametrize("dim", [64, 128, 1536])
+def test_tv_round_trip_mlx_to_cpu(tmp_path, dim, bit_width):
+    """A `.tv` file written by the MLX backend loads into the CPU
+    backend and produces working search results."""
+    from turbovec import TurboQuantIndex as RustIndex
+    from turbovec.mlx import TurboQuantIndex as MlxIndex
+
+    db = _random_unit_vectors(48, dim, seed=41)
+    queries = _random_unit_vectors(4, dim, seed=42)
+
+    mlx_idx = MlxIndex(dim=dim, bit_width=bit_width)
+    mlx_idx.add(db)
+    path = tmp_path / "mlx.tv"
+    mlx_idx.write(str(path))
+
+    rust_loaded = RustIndex.load(str(path))
+    assert rust_loaded.dim == dim
+    assert rust_loaded.bit_width == bit_width
+    assert len(rust_loaded) == 48
+
+    # CPU search on the loaded index should produce sensible top-k
+    # (most are nonempty and within the valid index range).
+    scores, idx = rust_loaded.search(queries, k=5)
+    assert scores.shape == (4, 5)
+    assert idx.shape == (4, 5)
+    assert (idx >= 0).all() and (idx < 48).all()
+
+
+def test_tv_round_trip_empty(tmp_path):
+    """An empty `.tv` file (no vectors added) round-trips correctly."""
+    from turbovec.mlx import TurboQuantIndex as MlxIndex
+
+    path = tmp_path / "empty.tv"
+    src = MlxIndex(dim=64, bit_width=4)
+    src.write(str(path))
+    loaded = MlxIndex.load(str(path))
+    assert len(loaded) == 0
+    assert loaded.dim == 64
+    assert loaded.bit_width == 4
+
+
+@pytest.mark.parametrize("bit_width", [2, 4])
+@pytest.mark.parametrize("dim", [64, 128])
+def test_tvim_round_trip_cpu_to_mlx(tmp_path, dim, bit_width):
+    """A `.tvim` file written by the Rust CPU backend loads correctly
+    on the MLX backend, ids round-trip, and search returns ids."""
+    from turbovec import IdMapIndex as RustIdMap
+    from turbovec.mlx import IdMapIndex as MlxIdMap
+
+    vectors = _random_unit_vectors(16, dim, seed=50)
+    ids = np.arange(1000, 1016, dtype=np.uint64)
+
+    cpu = RustIdMap(dim=dim, bit_width=bit_width)
+    cpu.add_with_ids(vectors, ids)
+    path = tmp_path / "cpu.tvim"
+    cpu.write(str(path))
+
+    mlx_loaded = MlxIdMap.load(str(path))
+    assert mlx_loaded.dim == dim
+    assert mlx_loaded.bit_width == bit_width
+    assert len(mlx_loaded) == 16
+    for id_ in ids:
+        assert int(id_) in mlx_loaded
+
+    queries = _random_unit_vectors(3, dim, seed=51)
+    scores, returned_ids = mlx_loaded.search(queries, k=4)
+    assert scores.shape == (3, 4)
+    assert returned_ids.shape == (3, 4)
+    assert returned_ids.dtype == np.uint64
+    assert set(returned_ids.flatten().tolist()) <= set(int(i) for i in ids)
+
+
+@pytest.mark.parametrize("bit_width", [2, 4])
+@pytest.mark.parametrize("dim", [64, 128])
+def test_tvim_round_trip_mlx_to_cpu(tmp_path, dim, bit_width):
+    """A `.tvim` file written by the MLX backend loads on the CPU
+    backend and exposes the same ids."""
+    from turbovec import IdMapIndex as RustIdMap
+    from turbovec.mlx import IdMapIndex as MlxIdMap
+
+    vectors = _random_unit_vectors(16, dim, seed=52)
+    ids = np.array([7, 11, 13, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71], dtype=np.uint64)
+
+    mlx_idx = MlxIdMap(dim=dim, bit_width=bit_width)
+    mlx_idx.add_with_ids(vectors, ids)
+    path = tmp_path / "mlx.tvim"
+    mlx_idx.write(str(path))
+
+    cpu_loaded = RustIdMap.load(str(path))
+    assert cpu_loaded.dim == dim
+    assert cpu_loaded.bit_width == bit_width
+    assert len(cpu_loaded) == 16
+    for id_ in ids:
+        assert int(id_) in cpu_loaded
+
+
+def test_id_map_rejects_duplicate_ids():
+    from turbovec.mlx import IdMapIndex as MlxIdMap
+
+    dim = 64
+    vectors = _random_unit_vectors(4, dim, seed=60)
+    index = MlxIdMap(dim=dim, bit_width=4)
+    index.add_with_ids(vectors, np.array([1, 2, 3, 4], dtype=np.uint64))
+    # Duplicate vs existing
+    with pytest.raises(ValueError):
+        index.add_with_ids(vectors[:1], np.array([2], dtype=np.uint64))
+    # Duplicate within the batch
+    with pytest.raises(ValueError):
+        MlxIdMap(dim=dim, bit_width=4).add_with_ids(
+            vectors, np.array([5, 6, 5, 7], dtype=np.uint64)
+        )

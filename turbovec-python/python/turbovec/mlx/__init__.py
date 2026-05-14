@@ -24,12 +24,12 @@ except ImportError as e:
 
 import numpy as np
 
-from . import _kernels
+from . import _io, _kernels
 from .._turbovec import codebook as _rust_codebook
 from .._turbovec import make_rotation_matrix as _rust_make_rotation_matrix
 
 
-__all__ = ["TurboQuantIndex"]
+__all__ = ["IdMapIndex", "TurboQuantIndex"]
 
 
 class TurboQuantIndex:
@@ -111,6 +111,33 @@ class TurboQuantIndex:
             self._norms = mx.concatenate([self._norms, norms], axis=0)
         self._n += n
 
+    def write(self, path: str) -> None:
+        """Write the index to a ``.tv`` file.
+
+        Round-trips byte-exactly with :meth:`turbovec.TurboQuantIndex.write`
+        — the CPU and MLX backends share the rotation matrix and
+        Lloyd-Max codebook, so the same input vectors encode to the
+        same bytes.
+        """
+        if self._packed_codes is None:
+            packed_np = np.zeros((0, self._bytes_per_vec), dtype=np.uint8)
+            norms_np = np.zeros((0,), dtype=np.float32)
+        else:
+            packed_np = np.asarray(self._packed_codes)
+            norms_np = np.asarray(self._norms)
+        _io.write_tv(path, self._dim, self._bit_width, self._n, packed_np, norms_np)
+
+    @classmethod
+    def load(cls, path: str) -> "TurboQuantIndex":
+        """Load a ``.tv`` file (written by either backend)."""
+        bit_width, dim, n_vectors, packed_np, norms_np = _io.load_tv(path)
+        index = cls(dim=dim, bit_width=bit_width)
+        if n_vectors:
+            index._packed_codes = mx.array(packed_np)
+            index._norms = mx.array(norms_np)
+            index._n = n_vectors
+        return index
+
     def search(self, queries, k: int):
         """Return the top-``k`` ``(scores, indices)`` for each query.
 
@@ -145,3 +172,108 @@ class TurboQuantIndex:
             np.asarray(top_scores),
             np.asarray(idx).astype(np.int64),
         )
+
+
+class IdMapIndex:
+    """Stable external-``u64``-id wrapper around the MLX
+    :class:`TurboQuantIndex`.
+
+    Mirrors :class:`turbovec.IdMapIndex` but runs on Apple GPU. Mutation
+    surface is ``add_with_ids`` only — ``remove`` is deferred. Round-trip
+    ``.tvim`` files with the CPU backend are byte-exact.
+    """
+
+    def __init__(self, dim: int, bit_width: int) -> None:
+        self._inner = TurboQuantIndex(dim=dim, bit_width=bit_width)
+        self._slot_to_id: list[int] = []
+        self._id_to_slot: dict[int, int] = {}
+
+    @property
+    def dim(self) -> int:
+        return self._inner.dim
+
+    @property
+    def bit_width(self) -> int:
+        return self._inner.bit_width
+
+    def __len__(self) -> int:
+        return len(self._inner)
+
+    def __contains__(self, id_: int) -> bool:
+        return int(id_) in self._id_to_slot
+
+    def contains(self, id_: int) -> bool:
+        return int(id_) in self._id_to_slot
+
+    def add_with_ids(self, vectors, ids) -> None:
+        """Add ``vectors`` paired with their external ``u64`` ``ids``.
+
+        Raises ``ValueError`` if any id is already present in the index
+        or if ``ids`` contains duplicates within the batch.
+        """
+        ids = np.ascontiguousarray(ids, dtype=np.uint64).reshape(-1)
+        n = ids.shape[0]
+        if not isinstance(vectors, mx.array):
+            vectors = mx.array(np.ascontiguousarray(vectors, dtype=np.float32))
+        if vectors.shape[0] != n:
+            raise ValueError(
+                f"expected {vectors.shape[0]} ids, got {n}"
+            )
+        seen: set[int] = set()
+        for id_ in ids:
+            id_int = int(id_)
+            if id_int in self._id_to_slot or id_int in seen:
+                raise ValueError(f"id {id_int} already in index")
+            seen.add(id_int)
+
+        base = len(self._inner)
+        self._inner.add(vectors)
+        for i, id_ in enumerate(ids):
+            id_int = int(id_)
+            slot = base + i
+            self._slot_to_id.append(id_int)
+            self._id_to_slot[id_int] = slot
+
+    def search(self, queries, k: int):
+        """Return top-``k`` ``(scores, ids)`` for each query.
+
+        ``ids`` is shape ``(nq, effective_k)`` ``uint64`` to match
+        :meth:`turbovec.IdMapIndex.search`.
+        """
+        scores, slot_idx = self._inner.search(queries, k)
+        if slot_idx.size == 0:
+            return scores, np.zeros(slot_idx.shape, dtype=np.uint64)
+        slot_to_id_arr = np.asarray(self._slot_to_id, dtype=np.uint64)
+        ids = slot_to_id_arr[slot_idx]
+        return scores, ids
+
+    def write(self, path: str) -> None:
+        """Write the index to a ``.tvim`` file."""
+        inner = self._inner
+        n = len(inner)
+        if inner._packed_codes is None:
+            packed_np = np.zeros((0, inner._bytes_per_vec), dtype=np.uint8)
+            norms_np = np.zeros((0,), dtype=np.float32)
+        else:
+            packed_np = np.asarray(inner._packed_codes)
+            norms_np = np.asarray(inner._norms)
+        slot_to_id_np = np.asarray(self._slot_to_id, dtype=np.uint64)
+        _io.write_tvim(
+            path, inner._dim, inner._bit_width, n,
+            packed_np, norms_np, slot_to_id_np,
+        )
+
+    @classmethod
+    def load(cls, path: str) -> "IdMapIndex":
+        """Load a ``.tvim`` file (written by either backend)."""
+        bit_width, dim, n_vectors, packed_np, norms_np, slot_to_id_np = _io.load_tvim(path)
+        index = cls(dim=dim, bit_width=bit_width)
+        if n_vectors:
+            index._inner._packed_codes = mx.array(packed_np)
+            index._inner._norms = mx.array(norms_np)
+            index._inner._n = n_vectors
+            index._slot_to_id = [int(x) for x in slot_to_id_np]
+            index._id_to_slot = {id_: slot for slot, id_ in enumerate(index._slot_to_id)}
+            if len(index._id_to_slot) != n_vectors:
+                raise ValueError("duplicate ids in loaded .tvim file")
+        return index
