@@ -2,6 +2,38 @@ use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2}
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 
+/// Build the deterministic `(dim, dim)` row-major orthogonal rotation
+/// matrix used by every `TurboQuantIndex` of that `dim`.
+///
+/// Exposed so alternate-backend implementations (e.g. the MLX path) can
+/// rotate inputs against the *same* matrix the CPU encoder uses,
+/// guaranteeing bit-compatible `.tv` / `.tvim` files across backends.
+#[pyfunction]
+fn make_rotation_matrix<'py>(
+    py: Python<'py>,
+    dim: usize,
+) -> Bound<'py, PyArray2<f32>> {
+    let flat = turbovec_core::rotation::make_rotation_matrix(dim);
+    numpy::ndarray::Array2::from_shape_vec((dim, dim), flat)
+        .unwrap()
+        .into_pyarray(py)
+}
+
+/// Lloyd-Max scalar codebook for the Beta((dim-1)/2, (dim-1)/2)
+/// post-rotation marginal at the given `bit_width`.
+///
+/// Returns `(boundaries, centroids)` as 1-D `float32` arrays of length
+/// `(2**bit_width) - 1` and `2**bit_width` respectively.
+#[pyfunction]
+fn codebook<'py>(
+    py: Python<'py>,
+    bit_width: usize,
+    dim: usize,
+) -> (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>) {
+    let (boundaries, centroids) = turbovec_core::codebook::codebook(bit_width, dim);
+    (boundaries.into_pyarray(py), centroids.into_pyarray(py))
+}
+
 #[pyclass]
 struct TurboQuantIndex {
     inner: turbovec_core::TurboQuantIndex,
@@ -197,5 +229,7 @@ impl IdMapIndex {
 fn _turbovec(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TurboQuantIndex>()?;
     m.add_class::<IdMapIndex>()?;
+    m.add_function(wrap_pyfunction!(make_rotation_matrix, m)?)?;
+    m.add_function(wrap_pyfunction!(codebook, m)?)?;
     Ok(())
 }
