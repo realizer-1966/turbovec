@@ -11,6 +11,46 @@ appears under each surface it touches.
 
 ## [Unreleased]
 
+## turbovec 0.5.1 (Python package) + turbovec 0.4.1 (Rust crate) — 2026-05-18
+
+### turbovec — Rust crate (current: 0.4.0 → next: 0.4.1)
+
+#### Added
+
+- **Block-level early exit for selective mask searches** (closes
+  [#30](https://github.com/RyanCodrai/turbovec/issues/30)). When a
+  search is issued with `Some(mask)` the SIMD kernels now check
+  whether each 32-vector block contains any allowed slots before
+  doing the LUT lookup + popcount + score-decode work for that
+  block. If not, the entire block is short-circuited at one
+  integer-load + branch per block. The AVX-512BW path additionally
+  short-circuits 64-vector pairs at once where possible.
+
+  Measured speedup at 1% selectivity, 100K vectors, d=1536 (mask
+  allowing the last 1K slots): **6.4× on ARM (M3 Max), 12.7× on x86
+  (Sapphire Rapids c3-standard-8)**. Unmasked search latency is
+  unchanged (the guard only fires when a mask is passed).
+
+  Public API: no change to existing surfaces.
+
+- **`turbovec::search::BLOCKS_SKIPPED_BY_MASK`** — atomic counter
+  incremented each time a block is short-circuited. Accessors
+  `blocks_skipped_by_mask()` and `reset_blocks_skipped_by_mask()`
+  are exposed for hybrid-retrieval telemetry. AVX-512BW pair-level
+  skips count as 2.
+
+### turbovec — Python package (current: 0.5.0 → next: 0.5.1)
+
+#### Added
+
+- **Block-level early exit for selective `search_with_mask` calls.**
+  Same kernel-level change as the Rust crate; Python users see
+  identical API and unchanged unmasked latency. Selective masks now
+  run substantially faster (≈6–13× at 1% selectivity, scaling with
+  index size — larger indices amortize fixed per-query cost more
+  and see larger speedups). Closes
+  [#30](https://github.com/RyanCodrai/turbovec/issues/30).
+
 ## turbovec 0.5.0 (Python package) + turbovec 0.4.0 (Rust crate) — 2026-05-18
 
 > **BREAKING** — on-disk file format version bumped from 1 to 2.
