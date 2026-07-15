@@ -212,7 +212,7 @@ async function ask(){
     const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q})});
     if(!r.ok){const t=await r.text();out.innerHTML='<div class="msg err">'+t+'</div>';return;}
     const d=await r.json();
-    let html='<div class="answer"><div class="label">답변</div>'+esc(d.answer)+'<div class="meta">검색 '+d.search_time_ms.toFixed(0)+'ms · LLM '+d.llm_time_ms.toFixed(0)+'ms</div></div>';
+    let html='<div class="answer"><div class="label">답변</div>'+md(d.answer)+'<div class="meta">검색 '+d.search_time_ms.toFixed(0)+'ms · LLM '+d.llm_time_ms.toFixed(0)+'ms</div></div>';
     html+='<div class="results" style="margin-top:8px">';
     d.results.forEach((r,i)=>{
       html+='<div class="result"><div class="hdr">['+(i+1)+'] '+r.source+' #'+r.chunk_idx+'<span class="score">점수 '+r.score.toFixed(2)+'</span></div><div class="txt">'+esc(r.text.slice(0,300))+(r.text.length>300?'...':'')+'</div></div>';
@@ -224,6 +224,33 @@ async function ask(){
 }
 
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+// Minimal markdown renderer: code blocks, bold, italic, headers, lists, links
+function md(s){
+  s=esc(s);
+  // Code blocks ```...```
+  s=s.replace(/```(\w*)\n([\s\S]*?)```/g,(m,lang,code)=>'<pre style="background:#0a0a0a;border:1px solid #333;border-radius:6px;padding:10px;overflow-x:auto;font-size:12px;margin:8px 0"><code>'+code.trim()+'</code></pre>');
+  // Inline code `code`
+  s=s.replace(/`([^`]+)`/g,'<code style="background:#0a0a0a;padding:2px 5px;border-radius:3px;font-size:13px">$1</code>');
+  // Headers ### / ## / #
+  s=s.replace(/^###\s+(.+)$/gm,'<h3 style="font-size:14px;font-weight:600;color:var(--accent);margin:10px 0 4px">$1</h3>');
+  s=s.replace(/^##\s+(.+)$/gm,'<h2 style="font-size:16px;font-weight:600;color:var(--accent);margin:12px 0 6px">$1</h2>');
+  s=s.replace(/^#\s+(.+)$/gm,'<h1 style="font-size:18px;font-weight:700;color:var(--accent);margin:14px 0 8px">$1</h1>');
+  // Bold **text**
+  s=s.replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+  // Italic *text*
+  s=s.replace(/\*([^*]+)\*/g,'<em>$1</em>');
+  // Links [text](url)
+  s=s.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" style="color:var(--accent);text-decoration:underline">$1</a>');
+  // Unordered list items
+  s=s.replace(/^\s*[-*]\s+(.+)$/gm,'<li style="margin-left:18px;list-style:disc">$1</li>');
+  // Ordered list items
+  s=s.replace(/^\s*\d+\.\s+(.+)$/gm,'<li style="margin-left:18px;list-style:decimal">$1</li>');
+  // Line breaks (double newline → paragraph)
+  s=s.replace(/\n\n/g,'</p><p style="margin:6px 0">');
+  s=s.replace(/\n/g,'<br>');
+  return '<p style="margin:6px 0">'+s+'</p>';
+}
 
 $('#q').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();ask();}});
 checkStatus();

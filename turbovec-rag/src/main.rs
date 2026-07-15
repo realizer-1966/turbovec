@@ -33,7 +33,7 @@ pub struct AppState {
 #[tokio::main]
 async fn main() {
     let local = std::env::var("OLLAMA_LOCAL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+        .unwrap_or_else(|_| "http://127.0.0.1:11434".into());
     let cloud = std::env::var("OLLAMA_CLOUD")
         .unwrap_or_else(|_| "https://ollama.com".into());
     let api_key = std::env::var("OLLAMA_API_KEY").unwrap_or_default();
