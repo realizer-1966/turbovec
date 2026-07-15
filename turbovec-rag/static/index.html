@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>turbovec RAG</title>
+<style>
+:root{--bg:#0f0f0f;--card:#1a1a2e;--accent:#4361ee;--text:#e0e0e0;--muted:#888;--ok:#4ade80;--err:#f87171;--warn:#fbbf24}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100dvh;display:flex;flex-direction:column}
+header{background:var(--card);padding:12px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #333;flex-shrink:0}
+header h1{font-size:18px;font-weight:600}
+header .badge{font-size:11px;background:var(--accent);color:#fff;padding:2px 8px;border-radius:8px}
+header .status{margin-left:auto;font-size:12px;color:var(--muted)}
+header .status.ok{color:var(--ok)}
+main{flex:1;overflow-y:auto;padding:16px;max-width:800px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.qbox{background:var(--card);border-radius:12px;padding:16px;flex-shrink:0}
+.qbox textarea{width:100%;background:#0a0a0a;color:var(--text);border:1px solid #333;border-radius:8px;padding:12px;font-size:15px;resize:none;outline:none;min-height:60px}
+.qbox textarea:focus{border-color:var(--accent)}
+.btn-row{display:flex;gap:8px;margin-top:10px}
+.btn{background:var(--accent);color:#fff;border:none;padding:10px 20px;border-radius:8px;font-size:14px;cursor:pointer;flex:1}
+.btn:active{opacity:.7}
+.btn.sec{background:#333}
+.btn:disabled{opacity:.4;cursor:default}
+.section{background:var(--card);border-radius:12px;padding:14px 16px;flex-shrink:0}
+.section .title{font-size:13px;color:var(--accent);font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.section .title .count{font-size:11px;color:var(--muted);font-weight:400}
+.doc-scroll{max-height:120px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.doc-scroll::-webkit-scrollbar{width:4px}
+.doc-scroll::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
+.doc-scroll::-webkit-scrollbar-track{background:transparent}
+.doc{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #222;font-size:13px}
+.doc:last-child{border-bottom:none}
+.doc .icon{width:20px;text-align:center;color:var(--accent)}
+.doc .name{flex:1;word-break:break-all}
+.doc .info{color:var(--muted);font-size:11px;white-space:nowrap}
+.progress{background:#0a0a0a;border-radius:8px;padding:12px;font-size:13px;min-height:40px;max-height:200px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.progress::-webkit-scrollbar{width:4px}
+.progress::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
+.progress::-webkit-scrollbar-track{background:transparent}
+.progress .bar{height:4px;background:#333;border-radius:2px;margin-top:8px;overflow:hidden}
+.progress .bar .fill{height:100%;background:var(--accent);border-radius:2px;transition:width .3s;width:0%}
+.progress .line{padding:2px 0;color:#bbb}
+.progress .line.active{color:var(--accent)}
+.progress .line.done{color:var(--ok)}
+.progress .line.err{color:var(--err)}
+.msg{padding:12px 16px;border-radius:10px;font-size:14px}
+.msg.ok{background:#16201a;color:var(--ok)}
+.msg.err{background:#2a1010;color:var(--err)}
+.answer{background:var(--card);border-radius:12px;padding:16px;white-space:pre-wrap;font-size:14px;line-height:1.6;max-height:400px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.answer::-webkit-scrollbar{width:4px}
+.answer::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
+.answer::-webkit-scrollbar-track{background:transparent}
+.answer .label{font-size:12px;color:var(--accent);font-weight:600;margin-bottom:8px}
+.answer .meta{font-size:12px;color:var(--muted);margin-top:10px;padding-top:8px;border-top:1px solid #333}
+.results{display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.results::-webkit-scrollbar{width:4px}
+.results::-webkit-scrollbar-thumb{background:#444;border-radius:2px}
+.results::-webkit-scrollbar-track{background:transparent}
+.result{background:#111;border-radius:8px;padding:12px;font-size:13px;line-height:1.5}
+.result .hdr{font-size:12px;color:var(--accent);margin-bottom:6px}
+.result .score{color:var(--muted);float:right}
+.result .txt{color:#bbb;word-break:break-word}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--muted);border-top-color:var(--accent);border-radius:50%;animation:sp .6s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>turbovec RAG</h1>
+  <span class="badge">4-bit</span>
+  <span class="status" id="status">연결 확인 중...</span>
+</header>
+<main>
+  <div class="section">
+    <div class="title">문서 <span class="count" id="docCount"></span></div>
+    <div class="doc-scroll" id="docList"><span class="spinner"></span>로딩 중...</div>
+  </div>
+
+  <div class="qbox">
+    <textarea id="q" placeholder="질문을 입력하세요..." autofocus></textarea>
+    <div class="btn-row">
+      <button class="btn" id="ask" onclick="ask()">질문하기</button>
+      <button class="btn sec" id="build" onclick="build()">인덱스 빌드</button>
+    </div>
+  </div>
+
+  <div id="progressBox" style="display:none">
+    <div class="progress" id="progress"></div>
+  </div>
+
+  <div id="output"></div>
+</main>
+
+<script>
+const $=s=>document.querySelector(s);
+const out=$('#output');
+const progBox=$('#progressBox');
+const progDiv=$('#progress');
+
+// Track docs state for build button enable/disable
+let savedDocsCount=-1, savedDocsSize=-1, isFirstCheck=true;
+
+async function checkStatus(){
+  try{
+    const r=await fetch('/api/status');
+    const d=await r.json();
+    const s=$('#status');
+    const btn=$('#build');
+    if(d.index_loaded){s.textContent=d.n_chunks+' 청크 로드됨';s.classList.add('ok');}
+    else{s.textContent='인덱스 없음';}
+    // On first load: disable build if index exists and docs match
+    // On subsequent loads: disable only if nothing changed since last check
+    if(isFirstCheck){
+      if(d.index_exists && d.index_loaded){
+        btn.disabled=true;btn.textContent='빌드 불필요';
+      }else{
+        btn.disabled=false;btn.textContent='인덱스 빌드';
+      }
+      isFirstCheck=false;
+    }else{
+      const docsChanged=(d.docs_count!==savedDocsCount || d.docs_total_size!==savedDocsSize);
+      if(d.index_exists && !docsChanged && d.index_loaded){
+        btn.disabled=true;btn.textContent='빌드 불필요';
+      }else{
+        btn.disabled=false;btn.textContent='인덱스 빌드';
+      }
+    }
+    savedDocsCount=d.docs_count;
+    savedDocsSize=d.docs_total_size;
+  }catch(e){$('#status').textContent='서버 오프라인';}
+}
+
+async function loadDocs(){
+  try{
+    const r=await fetch('/api/docs');
+    const docs=await r.json();
+    const el=$('#docList');
+    $('#docCount').textContent='('+docs.length+'개 파일)';
+    if(docs.length===0){el.innerHTML='<span style="color:var(--muted)">rag_docs/ 폴더가 비어있습니다</span>';return;}
+    el.innerHTML=docs.map(d=>{
+      const ext=d.name.split('.').pop().toUpperCase();
+      const sz=d.size<1024?d.size+'B':(d.size/1024).toFixed(1)+'KB';
+      return '<div class="doc"><span class="icon">'+(ext==='MD'?'📝':'📄')+'</span><span class="name">'+esc(d.name)+'</span><span class="info">'+sz+' · '+d.n_chunks+'청크</span></div>';
+    }).join('');
+    // Check if docs changed after loading
+    const totalSize=docs.reduce((a,d)=>a+d.size,0);
+    if(totalSize!==savedDocsSize || docs.length!==savedDocsCount){
+      $('#build').disabled=false;$('#build').textContent='인덱스 빌드';
+    }
+  }catch(e){$('#docList').innerHTML='<span style="color:var(--err)">로드 실패</span>';}
+}
+
+async function build(){
+  const btn=$('#build');btn.disabled=true;btn.textContent='빌드 중...';
+  progBox.style.display='block';
+  progDiv.innerHTML='<div class="line active"><span class="spinner"></span>시작 중...</div><div class="bar"><div class="fill" id="barFill"></div></div>';
+  const lines=[];
+  try{
+    const resp=await fetch('/api/build',{method:'POST'});
+    const reader=resp.body.getReader();
+    const dec=new TextDecoder();
+    let buf='';
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const parts=buf.split('\n\n');
+      buf=parts.pop();
+      for(const part of parts){
+        const data=part.replace(/^data:\s?/m,'').trim();
+        if(!data)continue;
+        try{
+          const d=JSON.parse(data);
+          if(d.success!==undefined){
+            // Final result
+            if(d.success){
+              lines.push('<div class="line done">'+esc(d.message)+'</div>');
+              progDiv.innerHTML=lines.join('')+'<div class="bar"><div class="fill" style="width:100%"></div></div>';
+              checkStatus();
+            }else{
+              lines.push('<div class="line err">'+esc(d.message)+'</div>');
+              progDiv.innerHTML=lines.join('');
+            }
+            break;
+          }else{
+            // Progress message (plain string)
+            lines.push('<div class="line">'+esc(data)+'</div>');
+            // Update bar based on embedding progress
+            const m=data.match(/(\d+)\/(\d+)/);
+            if(m){const pct=parseInt(m[1])/parseInt(m[2])*100;$('#barFill')&&($('#barFill').style.width=pct+'%');}
+            progDiv.innerHTML=lines.join('')+'<div class="bar"><div class="fill" id="barFill" style="width:'+((m?parseInt(m[1])/parseInt(m[2])*100:0))+'%"></div></div>';
+          }
+        }catch(e){
+          // Plain text progress
+          lines.push('<div class="line">'+esc(data)+'</div>');
+          progDiv.innerHTML=lines.join('')+'<div class="bar"><div class="fill"></div></div>';
+        }
+      }
+    }
+  }catch(e){progDiv.innerHTML='<div class="line err">'+e+'</div>';}
+  // Re-check status to update build button (disable if no changes)
+  checkStatus();
+}
+
+async function ask(){
+  const q=$('#q').value.trim();
+  if(!q)return;
+  const btn=$('#ask');btn.disabled=true;
+  out.innerHTML='<div class="progress"><span class="spinner"></span>검색 + 답변 생성 중...</div>';
+  try{
+    const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q})});
+    if(!r.ok){const t=await r.text();out.innerHTML='<div class="msg err">'+t+'</div>';return;}
+    const d=await r.json();
+    let html='<div class="answer"><div class="label">답변</div>'+esc(d.answer)+'<div class="meta">검색 '+d.search_time_ms.toFixed(0)+'ms · LLM '+d.llm_time_ms.toFixed(0)+'ms</div></div>';
+    html+='<div class="results" style="margin-top:8px">';
+    d.results.forEach((r,i)=>{
+      html+='<div class="result"><div class="hdr">['+(i+1)+'] '+r.source+' #'+r.chunk_idx+'<span class="score">점수 '+r.score.toFixed(2)+'</span></div><div class="txt">'+esc(r.text.slice(0,300))+(r.text.length>300?'...':'')+'</div></div>';
+    });
+    html+='</div>';
+    out.innerHTML=html;
+  }catch(e){out.innerHTML='<div class="msg err">'+e+'</div>';}
+  btn.disabled=false;
+}
+
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+$('#q').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();ask();}});
+checkStatus();
+loadDocs();
+</script>
+</body>
+</html>
