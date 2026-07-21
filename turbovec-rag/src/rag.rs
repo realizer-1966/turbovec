@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use turbovec::IdMapIndex;
 
 use crate::embed;
+use crate::embed_cache::{self, EmbedCache};
 use crate::{BIT_WIDTH, CHUNK_OVERLAP, CHUNK_SIZE, EMBED_DIM, EMBED_MODEL, LLM_MODEL};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -25,23 +26,45 @@ pub struct SearchResult {
     pub text: String,
 }
 
+/// Build-time document snapshot — persisted so the UI can detect
+/// when rag_docs/ has changed since the last successful build.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct BuildDocInfo {
+    pub name: String,
+    pub size: u64,
+    /// Content hash of the (post-strip-markdown) file text.
+    /// Used to detect content-only changes (same size, different text).
+    pub hash: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BuildInfo {
+    pub docs_count: usize,
+    pub docs_total_size: u64,
+    pub docs: Vec<BuildDocInfo>,
+}
+
 pub struct RagIndex {
     pub index: IdMapIndex,
     pub meta: HashMap<String, Chunk>,
+    pub build_info: Option<BuildInfo>,
 }
 
 impl RagIndex {
-    pub fn load(index_path: &str, meta_path: &str) -> Result<Self, String> {
+    pub fn load(index_path: &str, meta_path: &str, build_info_path: &str) -> Result<Self, String> {
         let index = IdMapIndex::load(Path::new(index_path))
             .map_err(|e| format!("load index: {e}"))?;
         let meta_str = std::fs::read_to_string(meta_path)
             .map_err(|e| format!("load meta: {e}"))?;
         let meta: HashMap<String, Chunk> = serde_json::from_str(&meta_str)
             .map_err(|e| format!("parse meta: {e}"))?;
-        Ok(Self { index, meta })
+        let build_info = std::fs::read_to_string(build_info_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+        Ok(Self { index, meta, build_info })
     }
 
-    pub fn save(&self, index_path: &str, meta_path: &str) -> Result<(), String> {
+    pub fn save(&self, index_path: &str, meta_path: &str, build_info_path: &str) -> Result<(), String> {
         self.index
             .write(Path::new(index_path))
             .map_err(|e| format!("save index: {e}"))?;
@@ -49,6 +72,12 @@ impl RagIndex {
             .map_err(|e| format!("serialize meta: {e}"))?;
         std::fs::write(meta_path, meta_str)
             .map_err(|e| format!("save meta: {e}"))?;
+        if let Some(bi) = &self.build_info {
+            let s = serde_json::to_string(bi)
+                .map_err(|e| format!("serialize build_info: {e}"))?;
+            std::fs::write(build_info_path, s)
+                .map_err(|e| format!("save build_info: {e}"))?;
+        }
         Ok(())
     }
 
@@ -204,11 +233,15 @@ pub fn list_documents(docs_dir: &str) -> Result<Vec<crate::routes::DocInfo>, Str
 }
 
 /// Build the RAG index with streaming progress via tokio::sync::mpsc.
+///
+/// Incremental: chunks whose text hashes are present in the on-disk embed
+/// cache skip the Ollama embed call. Only new/changed chunks hit the network.
 pub async fn build_index_streaming(
     client: &reqwest::Client,
     docs_dir: &str,
     index_path: &str,
     meta_path: &str,
+    build_info_path: &str,
     ollama_local: &str,
     tx: &tokio::sync::mpsc::Sender<String>,
 ) -> Result<(RagIndex, BuildStats), String> {
@@ -218,12 +251,14 @@ pub async fn build_index_streaming(
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut chunk_texts: Vec<String> = Vec::new();
     let mut chunk_ids: Vec<u64> = Vec::new();
+    let mut chunk_hashes: Vec<String> = Vec::new();
 
     for (fname, text) in &docs {
         let parts = chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP);
         let _ = tx.send(format!("파일 로드: {} ({} 청크)", fname, parts.len())).await;
         for (i, part) in parts.iter().enumerate() {
             let id = simple_hash(fname, i);
+            let h = embed_cache::content_hash(part);
             chunks.push(Chunk {
                 source: fname.clone(),
                 chunk_idx: i,
@@ -231,6 +266,7 @@ pub async fn build_index_streaming(
             });
             chunk_texts.push(part.clone());
             chunk_ids.push(id);
+            chunk_hashes.push(h);
         }
     }
 
@@ -238,23 +274,43 @@ pub async fn build_index_streaming(
         return Err("문서가 없습니다. rag_docs/ 폴더에 .txt/.md 파일을 넣어주세요.".into());
     }
 
-    let total = chunk_texts.len();
-    let _ = tx.send(format!("임베딩 시작: 총 {} 청크", total)).await;
+    // Load on-disk embed cache (keyed by content hash)
+    let cache_path = embed_cache::cache_path(index_path);
+    let mut cache = EmbedCache::load(&cache_path);
 
-    // Embed all chunks with progress
-    let mut vectors = Vec::with_capacity(chunk_texts.len());
-    for (i, text) in chunk_texts.iter().enumerate() {
-        let v = embed::embed(client, ollama_local, EMBED_MODEL, text).await?;
-        if v.len() != EMBED_DIM {
-            return Err(format!(
-                "embedding dimension mismatch: got {}, expected {}",
-                v.len(),
-                EMBED_DIM
-            ));
-        }
+    let total = chunk_texts.len();
+    let cached = chunk_hashes.iter().filter(|h| cache.get(h).is_some()).count();
+    let to_embed = total - cached;
+    let _ = tx.send(format!(
+        "임베딩 시작: 총 {} 청크 (캐시 {} · 새로 임베딩 {})",
+        total, cached, to_embed
+    )).await;
+
+    // Embed each chunk, using cache when available
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(chunk_texts.len());
+    let mut embed_hits = 0usize;
+    for (i, (text, hash)) in chunk_texts.iter().zip(chunk_hashes.iter()).enumerate() {
+        let v = if let Some(cached) = cache.get(hash) {
+            embed_hits += 1;
+            cached.clone()
+        } else {
+            let v = embed::embed(client, ollama_local, EMBED_MODEL, text).await?;
+            if v.len() != EMBED_DIM {
+                return Err(format!(
+                    "embedding dimension mismatch: got {}, expected {}",
+                    v.len(),
+                    EMBED_DIM
+                ));
+            }
+            cache.insert(hash.clone(), v.clone());
+            v
+        };
         vectors.push(v);
-        let _ = tx.send(format!("임베딩 {}/{} 완료", i + 1, total)).await;
+        let _ = tx.send(format!("임베딩 {}/{} 완료{}", i + 1, total, if embed_hits == i + 1 { " (캐시)" } else { "" })).await;
     }
+
+    // Persist the (possibly updated) cache
+    let _ = cache.save(&cache_path);
 
     let _ = tx.send("turbovec 인덱스 빌드 중...".into()).await;
 
@@ -273,8 +329,29 @@ pub async fn build_index_streaming(
     }
 
     let raw_size = flat.len() * 4;
-    let rag = RagIndex { index, meta };
-    rag.save(index_path, meta_path)?;
+    let build_docs: Vec<BuildDocInfo> = docs
+        .iter()
+        .map(|(name, text)| {
+            let size = std::fs::metadata(std::path::Path::new(docs_dir).join(name))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            BuildDocInfo {
+                name: name.clone(),
+                size,
+                hash: embed_cache::content_hash(text),
+            }
+        })
+        .collect();
+    let rag = RagIndex {
+        index,
+        meta,
+        build_info: Some(BuildInfo {
+            docs_count: docs.len(),
+            docs_total_size: raw_size as u64,
+            docs: build_docs,
+        }),
+    };
+    rag.save(index_path, meta_path, build_info_path)?;
 
     let idx_size = std::fs::metadata(index_path)
         .map(|m| m.len() as usize)
@@ -286,6 +363,8 @@ pub async fn build_index_streaming(
         embed_dim: EMBED_DIM,
         raw_bytes: raw_size,
         index_bytes: idx_size,
+        embed_hits,
+        embed_misses: to_embed,
     };
 
     Ok((rag, stats))
@@ -298,6 +377,8 @@ pub struct BuildStats {
     pub embed_dim: usize,
     pub raw_bytes: usize,
     pub index_bytes: usize,
+    pub embed_hits: usize,
+    pub embed_misses: usize,
 }
 
 /// Search the index for top-K chunks matching the query.

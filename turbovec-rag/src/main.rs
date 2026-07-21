@@ -10,6 +10,7 @@
 //   GET  /api/status  — index status
 
 mod embed;
+mod embed_cache;
 mod rag;
 mod routes;
 
@@ -43,13 +44,15 @@ async fn main() {
         .unwrap_or_else(|_| "rag_index.tvim".into());
     let meta_path = std::env::var("RAG_META_PATH")
         .unwrap_or_else(|_| "rag_meta.json".into());
+    let build_info_path = std::env::var("RAG_BUILD_INFO_PATH")
+        .unwrap_or_else(|_| "rag_build_info.json".into());
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3000);
 
     let state = Arc::new(AppState {
-        rag: RwLock::new(rag::RagIndex::load(&index_path, &meta_path).ok()),
+        rag: RwLock::new(rag::RagIndex::load(&index_path, &meta_path, &build_info_path).ok()),
         ollama_local: local.clone(),
         ollama_cloud: cloud,
         api_key,
@@ -58,8 +61,9 @@ async fn main() {
     let docs_dir = Arc::new(docs_dir);
     let index_path = Arc::new(index_path);
     let meta_path = Arc::new(meta_path);
+    let build_info_path = Arc::new(build_info_path);
 
-    let app = routes::router(state, docs_dir, index_path, meta_path);
+    let app = routes::router(state, docs_dir, index_path, meta_path, build_info_path);
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await

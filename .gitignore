@@ -14,6 +14,9 @@ evolve_rust/
 
 # RAG demo artifacts (바이너리 인덱스/덤프는 제외, 코드와 문서만 추적)
 rag_index.tvim
+rag_index.embedcache.json
 rag_meta.json
+rag_build_info.json
+turbovec-rag.log
 turbovec-dump/
 skills-lock.json

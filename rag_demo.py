@@ -39,7 +39,7 @@ CHUNK_SIZE = 300      # 문자 단위
 CHUNK_OVERLAP = 50
 
 # 로컬 Ollama (Termux는 포트 11434 막힘 → 8080 사용)
-LOCAL_OLLAMA = "http://127.0.0.1:8080"
+LOCAL_OLLAMA = "http://127.0.0.1:11434"
 # Ollama Cloud
 CLOUD_OLLAMA = "https://ollama.com"
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "")

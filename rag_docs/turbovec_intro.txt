@@ -1,9 +1,0 @@
-turbovec는 Google Research의 TurboQuant 알고리즘을 기반으로 한 Rust 벡터 인덱스 라이브러리입니다. 이 라이브러리는 고차원 벡터를 2-4비트로 압축하면서도 근사 최적 왜곡을 달성합니다. 10백만 개의 문서 코퍼스가 float32로는 31GB의 RAM이 필요하지만, turbovec를 사용하면 4GB에 들어맞습니다.
-
-turbovec의 핵심 특징은 온라인 색인입니다. 벡터를 추가하면 자동으로 인덱싱되며, 별도의 트레이닝 단계나 파라미터 튜닝, 코퍼스가 커짐에 따른 재빌드가 필요하지 않습니다. 이는 FAISS와 같은 기존 벡터 검색 라이브러리와 차별화되는 점입니다.
-
-SIMD 가속 검색은 turbovec의 또 다른 강점입니다. ARM에서는 NEON 명령어를, x86에서는 AVX-512BW 명령어를 사용하여 FAISS IndexPQFastScan보다 ARM에서 10-19% 빠릅니다. x86에서는 4비트 설정에서 승리하며, 2비트에서는 몇 퍼센트 뒤집니다.
-
-검색 시 필터링 기능도 제공합니다. allowlist나 slot bitmask를 search 함수에 전달하면 SIMD 커널이 직접 이를 처리합니다. 항상 허용된 집합에서 최대 k개의 결과를 반환하며, over-fetching이나 선택적 필터에 대한 recall 손실이 없습니다.
-
-turbovec는 두 가지 인덱스 타입을 제공합니다. TurboQuantIndex는 위치 기반 인덱스이고, IdMapIndex는 안정적인 외부 ID(u64)를 지원하는 인덱스입니다. IdMapIndex는 HashMap 기반의 양방향 id-slot 매핑을 사용하여 O(1) 삭제를 지원합니다.
